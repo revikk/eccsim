@@ -1,0 +1,17 @@
+{application, eccsim, [
+    {description, "Erlang Call Center Simulator"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {mod, {eccsim_app, []}},
+    {applications, [
+        kernel,
+        stdlib,
+        etiq
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, [
+        {"GitHub", "https://github.com/revikk/eccsim"}
+    ]}
+]}.

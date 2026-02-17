@@ -1,0 +1,37 @@
+# rebar3
+.rebar3
+_build
+_checkouts
+_vendor
+rebar.lock
+
+# Erlang
+*.o
+*.beam
+*.plt
+erl_crash.dump
+ebin
+
+# Common Test / EUnit
+.eunit
+log
+logs
+ct_run.*
+
+# Editor/IDE
+*.swp
+*.swo
+*~
+*.orig
+.idea
+*.iml
+.vscode
+.elp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Crash dumps
+rebar3.crashdump
+.erlang.cookie
