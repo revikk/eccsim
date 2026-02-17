@@ -15,7 +15,8 @@
 all() ->
     [
         {group, stats},
-        {group, simulation}
+        {group, simulation},
+        {group, metrics}
     ].
 
 groups() ->
@@ -33,6 +34,13 @@ groups() ->
             test_mm3,
             test_low_utilization,
             test_many_agents
+        ]},
+        {metrics, [], [
+            test_time_series_basic,
+            test_time_series_shape,
+            test_time_series_consistency,
+            test_csv_export,
+            test_no_interval_backward_compat
         ]}
     ].
 
@@ -137,6 +145,71 @@ test_many_agents(_Config) ->
     }),
     ?assert(maps:get(mean_wait_time, R) < 0.01),
     assert_close(maps:get(mean_service_time, R), 1.0 / Mu, ?REL_TOL).
+
+%%% Metrics Tests
+%%% ==============
+
+test_time_series_basic(_Config) ->
+    Interval = 1000,
+    MaxTime = 10_000,
+    {ok, #{results := Results, time_series := TS}} = eccsim:run(#{
+        lambda => 8.0, mu => 3.0, c => 3,
+        max_time => MaxTime, seed => ?SEED, interval => Interval
+    }),
+    ?assert(is_map(Results)),
+    ?assert(is_list(TS)),
+    ?assert(length(TS) >= 1),
+    %% Verify time values are sequential with correct step
+    Times = [maps:get(time, P) || P <- TS],
+    N = length(TS),
+    Expected = [float(I * Interval) || I <- lists:seq(1, N)],
+    ?assertEqual(Expected, Times).
+
+test_time_series_shape(_Config) ->
+    {ok, #{time_series := TS}} = eccsim:run(#{
+        lambda => 2.0, mu => 1.0, c => 3,
+        max_time => 5000, seed => ?SEED, interval => 1000
+    }),
+    Keys = [time, arrivals, completions, mean_wait_time, mean_service_time,
+            queue_length, system_length, utilization],
+    lists:foreach(fun(Point) ->
+        lists:foreach(fun(Key) ->
+            ?assert(maps:is_key(Key, Point), {missing_key, Key})
+        end, Keys)
+    end, TS).
+
+test_time_series_consistency(_Config) ->
+    {ok, #{results := R, time_series := TS}} = eccsim:run(#{
+        lambda => 8.0, mu => 3.0, c => 3,
+        max_time => ?MAX_TIME, seed => ?SEED, interval => 1000
+    }),
+    TotalCalls = maps:get(total_calls, R),
+    TotalCompletions = lists:sum([maps:get(completions, P) || P <- TS]),
+    %% Most completions should be covered by time-series buckets
+    ?assert(TotalCompletions > 0),
+    ?assert(TotalCompletions =< TotalCalls).
+
+test_csv_export(_Config) ->
+    {ok, #{time_series := TS}} = eccsim:run(#{
+        lambda => 2.0, mu => 1.0, c => 3,
+        max_time => 5000, seed => ?SEED, interval => 1000
+    }),
+    Csv = iolist_to_binary(eccsim_metrics:to_csv(TS)),
+    Lines = binary:split(Csv, <<"\n">>, [global, trim_all]),
+    %% Header + data rows
+    ?assertEqual(1 + length(TS), length(Lines)),
+    [Header | _] = Lines,
+    ?assertMatch(<<"time,arrivals,completions,", _/binary>>, Header).
+
+test_no_interval_backward_compat(_Config) ->
+    {ok, Results} = eccsim:run(#{
+        lambda => 2.0, mu => 1.0, c => 3,
+        max_time => 1000, seed => ?SEED
+    }),
+    %% Without interval, returns plain results map (not wrapped)
+    ?assert(maps:is_key(total_calls, Results)),
+    ?assertNot(maps:is_key(results, Results)),
+    ?assertNot(maps:is_key(time_series, Results)).
 
 %%% Helpers
 %%% =======

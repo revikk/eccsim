@@ -10,7 +10,8 @@
     mu := float(),
     c := pos_integer(),
     max_time := number(),
-    seed => rand:seed()
+    seed => rand:seed(),
+    interval => number()
 }.
 
 -opaque results() :: #{
@@ -23,13 +24,18 @@
     server_utilization := float()
 }.
 
--export_type([config/0, results/0]).
+-type run_result() ::
+    {ok, results()} |
+    {ok, #{results := results(), time_series := [eccsim_metrics:metric_point()]}}.
 
--spec run(config()) -> {ok, results()}.
+-export_type([config/0, results/0, run_result/0]).
+
+-spec run(config()) -> run_result().
 run(Config) ->
     EccsimConfig = parse_config(Config),
     Seed = maps:get(seed, Config, default_seed()),
-    State = init_state(EccsimConfig, Seed),
+    Interval = maps:get(interval, Config, undefined),
+    State = init_state(EccsimConfig, Seed, Interval),
     SimConfig = #sim_config{
         handler = eccsim_handler,
         handler_state = State,
@@ -40,7 +46,7 @@ run(Config) ->
     {ok, FinalState0} = etiq_gen:run(Pid),
     ok = etiq_sup:stop_sim(Pid),
     FinalState = assert_eccsim_state(FinalState0),
-    {ok, results(FinalState)}.
+    format_result(FinalState).
 
 %%% Internal
 %%% ========
@@ -51,8 +57,12 @@ parse_config(#{lambda := Lambda, mu := Mu, c := C, max_time := MaxTime}) ->
     true = Rho < 1.0,
     #eccsim_config{lambda = Lambda, mu = Mu, c = C, max_time = MaxTime}.
 
--spec init_state(eccsim_config(), rand:seed()) -> eccsim_state().
-init_state(Config, Seed) ->
+-spec init_state(eccsim_config(), rand:seed(), number() | undefined) -> eccsim_state().
+init_state(Config, Seed, Interval) ->
+    NextSnapshot = case Interval of
+        undefined -> undefined;
+        _ -> Interval
+    end,
     #eccsim_state{
         config = Config,
         queue = queue:new(),
@@ -62,7 +72,10 @@ init_state(Config, Seed) ->
         rand_state = rand:seed_s(exsss, Seed),
         last_event_time = 0.0,
         queue_area = 0.0,
-        system_area = 0.0
+        system_area = 0.0,
+        interval = Interval,
+        next_snapshot = NextSnapshot,
+        snapshots = []
     }.
 
 -spec default_seed() -> {pos_integer(), pos_integer(), pos_integer()}.
@@ -95,6 +108,17 @@ results(State) ->
         mean_system_length => State#eccsim_state.system_area / MaxTime,
         server_utilization => ServiceSum / (C * MaxTime)
     }.
+
+-spec format_result(eccsim_state()) -> run_result().
+format_result(#eccsim_state{interval = undefined} = State) ->
+    {ok, results(State)};
+format_result(State) ->
+    Results = results(State),
+    #eccsim_state{snapshots = Snaps, completed = Completed, config = Cfg} = State,
+    C = Cfg#eccsim_config.c,
+    Interval = State#eccsim_state.interval,
+    TimeSeries = eccsim_metrics:build(lists:reverse(Snaps), Completed, Interval, C),
+    {ok, #{results => Results, time_series => TimeSeries}}.
 
 -spec sum_times([call_record()]) -> {float(), float(), float()}.
 sum_times(Records) ->

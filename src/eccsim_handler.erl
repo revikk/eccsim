@@ -82,11 +82,27 @@ update_areas(Clock, State) ->
     DeltaT = Clock - State#eccsim_state.last_event_time,
     QLen = State#eccsim_state.queue_len,
     SLen = QLen + map_size(State#eccsim_state.in_service),
-    State#eccsim_state{
+    State1 = State#eccsim_state{
         queue_area = State#eccsim_state.queue_area + QLen * DeltaT,
         system_area = State#eccsim_state.system_area + SLen * DeltaT,
         last_event_time = Clock
-    }.
+    },
+    maybe_snapshot(Clock, State1).
+
+-spec maybe_snapshot(number(), eccsim_state()) -> eccsim_state().
+maybe_snapshot(Clock, #eccsim_state{next_snapshot = Next} = State)
+  when is_number(Next), Clock >= Next ->
+    QLen = State#eccsim_state.queue_len,
+    InSvc = map_size(State#eccsim_state.in_service),
+    Snap = #snapshot{time = Next, queue_len = QLen, in_service = InSvc},
+    Interval = State#eccsim_state.interval,
+    State1 = State#eccsim_state{
+        snapshots = [Snap | State#eccsim_state.snapshots],
+        next_snapshot = Next + Interval
+    },
+    maybe_snapshot(Clock, State1);
+maybe_snapshot(_Clock, State) ->
+    State.
 
 -spec exponential(float(), rand:state()) -> {float(), rand:state()}.
 exponential(Rate, RandState) ->
