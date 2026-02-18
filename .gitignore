@@ -35,3 +35,6 @@ Thumbs.db
 # Crash dumps
 rebar3.crashdump
 .erlang.cookie
+
+# Data
+*.csv

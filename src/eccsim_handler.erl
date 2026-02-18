@@ -90,12 +90,11 @@ update_areas(Clock, State) ->
     maybe_snapshot(Clock, State1).
 
 -spec maybe_snapshot(number(), eccsim_state()) -> eccsim_state().
-maybe_snapshot(Clock, #eccsim_state{next_snapshot = Next} = State)
-  when is_number(Next), Clock >= Next ->
+maybe_snapshot(Clock, #eccsim_state{next_snapshot = Next, interval = Interval} = State)
+  when is_number(Next), is_number(Interval), Clock >= Next ->
     QLen = State#eccsim_state.queue_len,
     InSvc = map_size(State#eccsim_state.in_service),
     Snap = #snapshot{time = Next, queue_len = QLen, in_service = InSvc},
-    Interval = State#eccsim_state.interval,
     State1 = State#eccsim_state{
         snapshots = [Snap | State#eccsim_state.snapshots],
         next_snapshot = Next + Interval

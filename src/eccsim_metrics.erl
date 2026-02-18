@@ -1,5 +1,16 @@
 -module(eccsim_metrics).
 
+%% CSV columns exported by to_csv/1:
+%%
+%%   time               - Simulation clock at the end of the snapshot interval
+%%   arrivals           - Number of customers that arrived during this interval
+%%   completions        - Number of calls completed (service ended) during this interval
+%%   mean_wait_time     - Average queue wait for customers completed in this interval
+%%   mean_service_time  - Average call duration for customers completed in this interval
+%%   queue_length       - Customers waiting in queue at the snapshot moment (instantaneous)
+%%   system_length      - Total customers in system (queue + in service) at snapshot moment
+%%   utilization        - Fraction of agents busy at snapshot moment (in_service / c)
+
 -export([build/4, to_csv/1]).
 
 -include("eccsim.hrl").
