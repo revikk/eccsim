@@ -21,6 +21,22 @@ rebar3 shell                                            # Interactive shell (aut
 
 `eccsim_app` (application) → `eccsim_sup` (one_for_one supervisor, currently no children)
 
+Simulation processes are started dynamically via `etiq_sup`.
+
+### Public API
+
+`eccsim:run/1` is the single entry point. It dispatches based on config shape:
+- `#{queues := _}` → multi-queue (M/M/c) simulation
+- `#{call_types := _}` → multi-skill simulation
+
+Both modes return `{ok, Results}` with stats, and optionally time-series data when an `interval` key is present in the config.
+
+### Simulation Modes
+
+**Multi-queue (M/M/c)** — runs independent parallel M/M/c queues, each driven by `eccsim_handler`. Results include per-queue and aggregate statistics. Validated against analytical Erlang-C formulas.
+
+**Multi-skill** — runs a single simulation with typed calls, skilled agents, and pluggable routing via the `eccsim_router` behaviour. Agents have skill sets and priority orderings. Currently one routing strategy exists: `eccsim_router_longest_idle` (longest-idle-agent first, priority-ordered call selection).
+
 ### etiq Integration
 
 The core simulation engine is `etiq`. To build simulation logic, implement the `etiq_handler` behavior:
@@ -38,6 +54,35 @@ Key records from `etiq.hrl`:
 - `#sim_config{handler, handler_state, max_time}` — simulation configuration
 
 Events are stored in a priority queue (`gb_trees`) keyed by `{Time, Ref}`. The simulation processes events in chronological order, calling the handler for each one. The handler returns new events to schedule and updated state.
+
+### Key Modules
+
+| Module | Role |
+|--------|------|
+| `eccsim` | Public API — dispatches to multi-queue or multi-skill paths |
+| `eccsim_handler` | `etiq_handler` for single M/M/c queue events (`customer_arrival`, `service_end`) |
+| `eccsim_ms_handler` | `etiq_handler` for multi-skill events (`ms_call_arrival`, `ms_service_end`) |
+| `eccsim_router` | Behaviour definition + dispatcher for pluggable routing strategies |
+| `eccsim_router_longest_idle` | Longest-idle-agent routing: selects idle agent with matching skill, picks next call by agent priority |
+| `eccsim_metrics` | Time-series metrics builder and CSV export for multi-queue results |
+| `eccsim_ms_metrics` | Time-series metrics builder and CSV export for multi-skill results |
+| `eccsim_stats` | Analytical M/M/c formulas (Erlang-C, utilization, Little's Law) |
+
+### Key Records (`include/eccsim.hrl`)
+
+**Single-queue / multi-queue:**
+- `#eccsim_config{lambda, mu, c, max_time}` — per-queue simulation parameters
+- `#eccsim_state{}` — full simulation state for one M/M/c queue
+- `#call_record{arrival_time, service_start, service_end}` — completed call data
+- `#snapshot{time, queue_len, in_service}` — point-in-time state snapshot
+
+**Multi-skill:**
+- `#ms_config{call_types, agents, router, max_time}` — multi-skill simulation config
+- `#ms_state{}` — full simulation state for multi-skill run
+- `#call_type_config{name, lambda, mu}` — arrival/service rates per call type
+- `#agent{id, skills, priority, idle_since}` — agent with skill set and priority ordering
+- `#ms_call_record{call_type, arrival_time, service_start, service_end, agent_id}` — completed multi-skill call
+- `#ms_snapshot{time, queue_lens, in_service}` — per-type queue lengths and in-service counts
 
 ## Code Style Constraints (elvis.config)
 
