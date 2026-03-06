@@ -1,16 +1,30 @@
 -module(eccsim_ms_handler).
 
+-moduledoc "etiq_handler implementation for multi-skill call center simulation.
+Processes ms_call_arrival and ms_service_end events, maintaining queues,
+agent state, and time-area accumulators for Little's Law metrics.".
+
 -behaviour(etiq_handler).
 
 -export([handle_event/3]).
 
+%% Dialyzer: the etiq_handler callback spec uses etiq_handler:event() (opaque),
+%% but our implementation returns concrete #event{} records (from etiq.hrl).
+%% etiq provides no event constructor — direct record use is the intended API.
+-dialyzer({no_opaque, handle_event/3}).
+
 -include("eccsim.hrl").
 -include_lib("etiq/include/etiq.hrl").
 
--export_type([ms_state/0]).
+-export_type([ms_state/0, sim_event/0]).
+
+%% Local alias for the etiq event record type, used in internal specs.
+%% etiq_handler:event() is opaque externally, but etiq.hrl exposes the record
+%% for construction. Using a local type avoids record syntax in specs.
+-opaque sim_event() :: #event{}.
 
 -spec handle_event(etiq_handler:event(), number(), ms_state()) ->
-    {[etiq_handler:event()], ms_state()}.
+    {[sim_event()], ms_state()}.
 handle_event(#event{type = ms_call_arrival, data = CallType}, Clock, State) ->
     handle_arrival(assert_atom(CallType), Clock, State);
 handle_event(#event{type = ms_service_end, data = Data}, Clock, State) ->
@@ -21,7 +35,7 @@ handle_event(#event{type = ms_service_end, data = Data}, Clock, State) ->
 %%% ================
 
 -spec handle_arrival(atom(), number(), ms_state()) ->
-    {[etiq_handler:event()], ms_state()}.
+    {[sim_event()], ms_state()}.
 handle_arrival(CallType, Clock, State0) ->
     State1 = update_areas(Clock, State0),
     Config = State1#ms_state.config,
@@ -38,8 +52,8 @@ handle_arrival(CallType, Clock, State0) ->
             {[NextArrival], State3}
     end.
 
--spec assign_to_agent(agent(), atom(), float(), number(), etiq_handler:event(), ms_state()) ->
-    {[etiq_handler:event()], ms_state()}.
+-spec assign_to_agent(agent(), atom(), number(), number(), sim_event(), ms_state()) ->
+    {[sim_event()], ms_state()}.
 assign_to_agent(Agent, CallType, ArrivalTime, Clock, NextArrival, State) ->
     Config = State#ms_state.config,
     TypeCfg = maps:get(CallType, Config#ms_config.call_types),
@@ -69,7 +83,7 @@ enqueue_call(CallType, Clock, State) ->
 %%% ====================
 
 -spec handle_service_end(atom(), term(), number(), ms_state()) ->
-    {[etiq_handler:event()], ms_state()}.
+    {[sim_event()], ms_state()}.
 handle_service_end(CallType, AgentId, Clock, State0) ->
     State1 = update_areas(Clock, State0),
     {Agent, _Type, ArrivalTime, ServiceStart} = maps:get(AgentId, State1#ms_state.busy_agents),
@@ -88,7 +102,7 @@ handle_service_end(CallType, AgentId, Clock, State0) ->
     try_serve_next(Agent, Clock, State2).
 
 -spec try_serve_next(agent(), number(), ms_state()) ->
-    {[etiq_handler:event()], ms_state()}.
+    {[sim_event()], ms_state()}.
 try_serve_next(Agent, Clock, State) ->
     Router = State#ms_state.config#ms_config.router,
     case eccsim_router:find_next_call(Router, Agent, State#ms_state.queues) of
@@ -101,7 +115,7 @@ try_serve_next(Agent, Clock, State) ->
     end.
 
 -spec start_from_queue(agent(), atom(), number(), ms_state()) ->
-    {[etiq_handler:event()], ms_state()}.
+    {[sim_event()], ms_state()}.
 start_from_queue(Agent, CallType, Clock, State) ->
     Queue = maps:get(CallType, State#ms_state.queues),
     {{value, {WaitArrival, _Ref}}, NewQueue} = queue:out(Queue),
@@ -143,7 +157,7 @@ maybe_snapshot(Clock, #ms_state{next_snapshot = Next, interval = Interval} = Sta
     InService = count_busy_by_type(State#ms_state.busy_agents),
     Snap = #ms_snapshot{
         time = Next,
-        queue_lens = maps:map(fun(_K, V) -> V end, State#ms_state.queue_lens),
+        queue_lens = State#ms_state.queue_lens,
         in_service = InService
     },
     State1 = State#ms_state{

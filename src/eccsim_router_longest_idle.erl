@@ -1,12 +1,14 @@
 -module(eccsim_router_longest_idle).
 
+-moduledoc "Routing strategy: serve the longest-idle eligible agent, and dequeue
+calls in the agent's priority order when a service slot becomes free.".
+
 -behaviour(eccsim_router).
 
 -export([find_agent/2, find_next_call/2]).
+-export_type([agent/0]).
 
 -include("eccsim.hrl").
-
--export_type([agent/0]).
 
 -doc "Find the longest-idle agent whose skills include CallType.
 IdleAgents must be sorted by idle_since ascending (longest-idle first).

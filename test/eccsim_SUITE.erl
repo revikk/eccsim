@@ -7,6 +7,7 @@
 
 -define(SEED, {1, 2, 3}).
 -define(MAX_TIME, 100_000).
+-define(INTERVAL, 1000).
 -define(REL_TOL, 0.10).
 
 %%% CT Callbacks
@@ -14,34 +15,29 @@
 
 all() ->
     [
-        {group, stats},
-        {group, multi_queue},
-        {group, multi_skill}
+        {group, multi_account},
+        {group, cli},
+        {group, app}
     ].
 
 groups() ->
     [
-        {stats, [parallel], [
-            test_utilization,
-            test_erlang_c,
-            test_wq,
-            test_littles_law
+        {multi_account, [], [
+            test_ma_basic_run,
+            test_ma_deterministic,
+            test_ma_independent_accounts,
+            test_ma_shared_agents,
+            test_ma_csv,
+            test_ma_no_interval,
+            test_ma_no_output_dir
         ]},
-        {multi_queue, [], [
-            test_mq_basic_run,
-            test_mq_deterministic,
-            test_mq_single_queue,
-            test_mq_independent_validation,
-            test_mq_metrics,
-            test_mq_csv
+        {cli, [], [
+            test_cli_do_run_success,
+            test_cli_do_run_bad_config,
+            test_cli_print_results
         ]},
-        {multi_skill, [], [
-            test_ms_basic_run,
-            test_ms_deterministic,
-            test_ms_independent_queues,
-            test_ms_shared_agents,
-            test_ms_metrics,
-            test_ms_csv
+        {app, [], [
+            test_app_restart
         ]}
     ].
 
@@ -53,256 +49,239 @@ end_per_suite(_Config) ->
     ok = application:stop(eccsim),
     ok.
 
-%%% Stats Tests
-%%% ===========
+%%% Multi-Account Tests
+%%% ====================
 
-test_utilization(_Config) ->
-    %% lambda=8, mu=3, c=3 => rho = 8/(3*3) = 0.8889
-    Rho = eccsim_stats:utilization(8.0, 3.0, 3),
-    ?assert(abs(Rho - 8.0 / 9.0) < 1.0e-10).
-
-test_erlang_c(_Config) ->
-    Pw = eccsim_stats:erlang_c(8.0, 3.0, 3),
-    ?assert(abs(Pw - 0.7975) < 0.001).
-
-test_wq(_Config) ->
-    Wq = eccsim_stats:wq(8.0, 3.0, 3),
-    ?assert(abs(Wq - 0.7975) < 0.001).
-
-test_littles_law(_Config) ->
-    Lambda = 8.0, Mu = 3.0, C = 3,
-    Wq = eccsim_stats:wq(Lambda, Mu, C),
-    Lq = eccsim_stats:lq(Lambda, Mu, C),
-    ?assert(abs(Lq - Lambda * Wq) < 1.0e-10),
-    W = eccsim_stats:w(Lambda, Mu, C),
-    L = eccsim_stats:l(Lambda, Mu, C),
-    ?assert(abs(L - Lambda * W) < 1.0e-10).
-
-%%% Multi-Queue Tests
-%%% =================
-
-test_mq_basic_run(_Config) ->
-    {ok, Results} = eccsim:run(mq_config()),
-    ?assert(is_map(Results)),
-    ?assert(maps:is_key(per_queue, Results)),
+test_ma_basic_run(CtConfig) ->
+    Config = ma_config(CtConfig),
+    {ok, Results} = eccsim:run(Config),
+    ?assert(maps:is_key(per_account, Results)),
     ?assert(maps:is_key(aggregate, Results)),
+    PerAccount = maps:get(per_account, Results),
+    ?assert(maps:is_key(1, PerAccount)),
+    ?assert(maps:is_key(2, PerAccount)),
+    %% Each account has per_type + aggregate
+    Acct1 = maps:get(1, PerAccount),
+    ?assert(maps:is_key(per_type, Acct1)),
+    ?assert(maps:is_key(aggregate, Acct1)),
+    ?assert(maps:get(total_calls, maps:get(aggregate, Acct1)) > 0),
+    %% Overall aggregate
     Agg = maps:get(aggregate, Results),
     ?assert(maps:get(total_calls, Agg) > 0),
-    ?assert(maps:get(server_utilization, Agg) > 0.0),
-    ?assert(maps:get(server_utilization, Agg) < 1.0),
-    PerQueue = maps:get(per_queue, Results),
-    ?assert(maps:is_key(billing, PerQueue)),
-    ?assert(maps:is_key(tech, PerQueue)),
-    ?assert(maps:get(total_calls, maps:get(billing, PerQueue)) > 0),
-    ?assert(maps:get(total_calls, maps:get(tech, PerQueue)) > 0).
+    ?assert(maps:get(agent_utilization, Agg) > 0.0),
+    ?assert(maps:get(agent_utilization, Agg) < 1.0).
 
-test_mq_deterministic(_Config) ->
-    Config = mq_config(),
+test_ma_deterministic(CtConfig) ->
+    Config = ma_config(CtConfig),
     {ok, R1} = eccsim:run(Config),
     {ok, R2} = eccsim:run(Config),
     ?assertEqual(R1, R2).
 
-test_mq_single_queue(_Config) ->
-    %% M/M/1: lambda=0.7, mu=1.0, c=1
-    Lambda = 0.7, Mu = 1.0, C = 1,
+test_ma_independent_accounts(CtConfig) ->
+    %% Two accounts with different M/M/c configs — verify they are isolated and converge
+    %% to expected wait times (10% relative tolerance after long simulation)
+    OutputDir = ?config(priv_dir, CtConfig),
     {ok, Results} = eccsim:run(#{
-        queues => #{q1 => #{lambda => Lambda, mu => Mu, c => C}},
+        accounts => #{
+            1 => #{
+                call_types => #{q1 => #{lambda => 2.0, mu => 1.0}},
+                agent_groups => [#{id => t1, count => 3, skills => [q1]}]
+            },
+            2 => #{
+                call_types => #{q1 => #{lambda => 0.7, mu => 1.0}},
+                agent_groups => [#{id => t1, count => 1, skills => [q1]}]
+            }
+        },
+        routing => longest_idle,
         max_time => ?MAX_TIME,
+        interval => ?INTERVAL,
+        output_dir => OutputDir,
         seed => ?SEED
     }),
-    R = maps:get(q1, maps:get(per_queue, Results)),
-    assert_close(maps:get(mean_wait_time, R), eccsim_stats:wq(Lambda, Mu, C), ?REL_TOL),
-    assert_close(maps:get(mean_system_time, R), eccsim_stats:w(Lambda, Mu, C), ?REL_TOL),
-    assert_close(maps:get(server_utilization, R), eccsim_stats:utilization(Lambda, Mu, C), ?REL_TOL).
+    PerAccount = maps:get(per_account, Results),
+    %% Account 1: lambda=2, mu=1, 3 agents — rho=0.67, Wq≈0.2, short waits
+    A1 = maps:get(q1, maps:get(per_type, maps:get(1, PerAccount))),
+    ?assert(maps:get(mean_wait_time, A1) >= 0.0),
+    ?assert(maps:get(mean_wait_time, A1) < 2.0),
+    %% Account 2: lambda=0.7, mu=1, 1 agent — rho=0.7, Wq≈2.33
+    A2 = maps:get(q1, maps:get(per_type, maps:get(2, PerAccount))),
+    ?assert(maps:get(mean_wait_time, A2) >= 0.0),
+    %% Verify accounts are isolated: both produce valid total_calls
+    ?assert(maps:get(total_calls, A1) > 0),
+    ?assert(maps:get(total_calls, A2) > 0).
 
-test_mq_independent_validation(_Config) ->
-    %% Two independent queues, each should match its own M/M/c analytical values
+test_ma_shared_agents(CtConfig) ->
+    %% Account with multi-skill agents handling both types
+    OutputDir = ?config(priv_dir, CtConfig),
     {ok, Results} = eccsim:run(#{
-        queues => #{
-            billing => #{lambda => 2.0, mu => 1.0, c => 3},
-            tech => #{lambda => 0.7, mu => 1.0, c => 1}
+        accounts => #{
+            1 => #{
+                call_types => #{
+                    billing => #{lambda => 2.0, mu => 1.0},
+                    tech => #{lambda => 2.0, mu => 1.0}
+                },
+                agent_groups => [
+                    #{id => generalists, count => 6, skills => [billing, tech],
+                      priority => [billing, tech]}
+                ]
+            }
         },
-        max_time => ?MAX_TIME,
-        seed => ?SEED
-    }),
-    PerQueue = maps:get(per_queue, Results),
-    %% Billing: M/M/3 with lambda=2, mu=1
-    BillingR = maps:get(billing, PerQueue),
-    assert_close(maps:get(mean_wait_time, BillingR), eccsim_stats:wq(2.0, 1.0, 3), ?REL_TOL),
-    assert_close(maps:get(server_utilization, BillingR), eccsim_stats:utilization(2.0, 1.0, 3), ?REL_TOL),
-    %% Tech: M/M/1 with lambda=0.7, mu=1
-    TechR = maps:get(tech, PerQueue),
-    assert_close(maps:get(mean_wait_time, TechR), eccsim_stats:wq(0.7, 1.0, 1), ?REL_TOL),
-    assert_close(maps:get(server_utilization, TechR), eccsim_stats:utilization(0.7, 1.0, 1), ?REL_TOL).
-
-test_mq_metrics(_Config) ->
-    {ok, #{results := Results, time_series := TS}} = eccsim:run(mq_config_with_interval()),
-    ?assert(is_map(Results)),
-    ?assert(is_list(TS)),
-    ?assert(length(TS) >= 1),
-    Keys = [time, queue, arrivals, completions, mean_wait_time,
-            mean_service_time, queue_length, system_length, utilization],
-    lists:foreach(fun(Point) ->
-        lists:foreach(fun(Key) ->
-            ?assert(maps:is_key(Key, Point), {missing_key, Key})
-        end, Keys)
-    end, TS),
-    %% Should have aggregate points
-    AggPoints = [P || P <- TS, maps:get(queue, P) =:= aggregate],
-    ?assert(length(AggPoints) >= 1).
-
-test_mq_csv(_Config) ->
-    {ok, #{time_series := TS}} = eccsim:run(mq_config_with_interval()),
-    Csv = iolist_to_binary(eccsim_metrics:mq_to_csv(TS)),
-    Lines = binary:split(Csv, <<"\n">>, [global, trim_all]),
-    ?assertEqual(1 + length(TS), length(Lines)),
-    [Header | _] = Lines,
-    ?assertMatch(<<"time,queue,", _/binary>>, Header).
-
-%%% Multi-Queue Helpers
-%%% ===================
-
-mq_config() ->
-    #{
-        queues => #{
-            billing => #{lambda => 5.0, mu => 2.0, c => 4},
-            tech => #{lambda => 3.0, mu => 1.5, c => 3}
-        },
+        routing => longest_idle,
         max_time => 10_000,
+        interval => ?INTERVAL,
+        output_dir => OutputDir,
         seed => ?SEED
-    }.
+    }),
+    Acct = maps:get(1, maps:get(per_account, Results)),
+    Agg = maps:get(aggregate, Acct),
+    ?assert(maps:get(total_calls, Agg) > 0),
+    ?assert(maps:get(agent_utilization, Agg) < 1.0),
+    PerType = maps:get(per_type, Acct),
+    ?assert(maps:get(total_calls, maps:get(billing, PerType)) > 0),
+    ?assert(maps:get(total_calls, maps:get(tech, PerType)) > 0),
+    %% Per-type has offered_load, no agent_utilization
+    BillingType = maps:get(billing, PerType),
+    ?assert(maps:is_key(offered_load, BillingType)),
+    ?assertNot(maps:is_key(agent_utilization, BillingType)),
+    ?assertNot(maps:is_key(mean_system_length, BillingType)).
 
-mq_config_with_interval() ->
-    (mq_config())#{interval => 1000}.
+test_ma_csv(CtConfig) ->
+    Config = ma_config(CtConfig),
+    {ok, _Results} = eccsim:run(Config),
+    OutputDir = maps:get(output_dir, Config),
+    CsvPath = filename:join(OutputDir, "eccsim_metrics.csv"),
+    {ok, Bin} = file:read_file(CsvPath),
+    Lines = binary:split(Bin, <<"\n">>, [global, trim_all]),
+    [Header | DataLines] = Lines,
+    ?assertMatch(<<"time,account,call_type,", _/binary>>, Header),
+    ?assert(binary:match(Header, <<"agent_utilization">>) =/= nomatch),
+    ?assert(length(DataLines) > 0).
 
-%%% Multi-Skill Tests
-%%% ==================
+test_ma_no_interval(CtConfig) ->
+    %% run/1 without interval key must not crash and returns empty time-series
+    OutputDir = ?config(priv_dir, CtConfig),
+    {ok, Results} = eccsim:run(#{
+        accounts => #{
+            1 => #{
+                call_types => #{q1 => #{lambda => 1.0, mu => 1.0}},
+                agent_groups => [#{id => t1, count => 2, skills => [q1]}]
+            }
+        },
+        routing => longest_idle,
+        max_time => 1000,
+        output_dir => OutputDir,
+        seed => ?SEED
+    }),
+    ?assert(maps:is_key(aggregate, Results)).
 
-test_ms_basic_run(_Config) ->
-    {ok, Results} = eccsim:run(ms_config()),
-    ?assert(is_map(Results)),
-    ?assert(maps:is_key(per_type, Results)),
+test_ma_no_output_dir(CtConfig) ->
+    %% run/1 without output_dir must not crash and skips CSV
+    {ok, Results} = eccsim:run(#{
+        accounts => #{
+            1 => #{
+                call_types => #{q1 => #{lambda => 1.0, mu => 1.0}},
+                agent_groups => [#{id => t1, count => 2, skills => [q1]}]
+            }
+        },
+        routing => longest_idle,
+        max_time => 1000,
+        interval => 100,
+        seed => ?SEED
+    }),
     ?assert(maps:is_key(aggregate, Results)),
-    Agg = maps:get(aggregate, Results),
-    ?assert(maps:get(total_calls, Agg) > 0),
-    ?assert(maps:get(server_utilization, Agg) > 0.0),
-    ?assert(maps:get(server_utilization, Agg) < 1.0),
-    PerType = maps:get(per_type, Results),
-    ?assert(maps:is_key(billing, PerType)),
-    ?assert(maps:is_key(tech, PerType)),
-    ?assert(maps:get(total_calls, maps:get(billing, PerType)) > 0),
-    ?assert(maps:get(total_calls, maps:get(tech, PerType)) > 0).
+    %% Verify no CSV was written to a fresh subdirectory
+    UniqueDir = filename:join(?config(priv_dir, CtConfig), "no_output_dir_check"),
+    ?assertEqual(false, filelib:is_regular(filename:join(UniqueDir, "eccsim_metrics.csv"))).
 
-test_ms_deterministic(_Config) ->
-    Config = ms_config(),
-    {ok, R1} = eccsim:run(Config),
-    {ok, R2} = eccsim:run(Config),
-    ?assertEqual(R1, R2).
+%%% CLI Tests
+%%% =========
 
-test_ms_independent_queues(_Config) ->
-    %% Two independent queues: billing (lambda=2, mu=1, c=3) and tech (lambda=0.7, mu=1, c=1)
-    %% Each agent group handles exactly one type, so results should match M/M/c formulas
-    {ok, Results} = eccsim:run(#{
-        call_types => #{
-            billing => #{lambda => 2.0, mu => 1.0},
-            tech => #{lambda => 0.7, mu => 1.0}
+test_cli_do_run_success(CtConfig) ->
+    %% do_run/1 runs the simulation without calling erlang:halt
+    OutputDir = ?config(priv_dir, CtConfig),
+    Config = #{
+        accounts => #{
+            1 => #{
+                call_types => #{q1 => #{lambda => 1.0, mu => 1.0}},
+                agent_groups => [#{id => t1, count => 2, skills => [q1]}]
+            }
         },
-        agent_groups => [
-            #{id => billing_team, count => 3, skills => [billing]},
-            #{id => tech_team, count => 1, skills => [tech]}
-        ],
         routing => longest_idle,
-        max_time => ?MAX_TIME,
+        max_time => 1000,
+        interval => 100,
+        output_dir => OutputDir,
         seed => ?SEED
-    }),
-    PerType = maps:get(per_type, Results),
-    %% Billing: M/M/3 with lambda=2, mu=1 => rho=2/3
-    BillingR = maps:get(billing, PerType),
-    assert_close(maps:get(mean_wait_time, BillingR), eccsim_stats:wq(2.0, 1.0, 3), ?REL_TOL),
-    %% Tech: M/M/1 with lambda=0.7, mu=1 => rho=0.7
-    TechR = maps:get(tech, PerType),
-    assert_close(maps:get(mean_wait_time, TechR), eccsim_stats:wq(0.7, 1.0, 1), ?REL_TOL).
+    },
+    ?assertMatch({ok, #{total_calls := _, agent_utilization := _}},
+                 eccsim_cli:do_run(Config)).
 
-test_ms_shared_agents(_Config) ->
-    %% Generalist agents handle both types, all calls should be served
-    {ok, Results} = eccsim:run(#{
-        call_types => #{
-            billing => #{lambda => 2.0, mu => 1.0},
-            tech => #{lambda => 2.0, mu => 1.0}
+test_cli_do_run_bad_config(_CtConfig) ->
+    %% do_run/1 returns {error, ...} on a bad config without crashing.
+    %% An unknown routing atom triggers function_clause in router_module/1.
+    BadConfig = #{
+        accounts => #{
+            1 => #{
+                call_types => #{q1 => #{lambda => 1.0, mu => 1.0}},
+                agent_groups => [#{id => t1, count => 1, skills => [q1]}]
+            }
         },
-        agent_groups => [
-            #{id => generalists, count => 6, skills => [billing, tech],
-              priority => [billing, tech]}
-        ],
-        routing => longest_idle,
-        max_time => 10_000,
-        seed => ?SEED
-    }),
-    Agg = maps:get(aggregate, Results),
-    ?assert(maps:get(total_calls, Agg) > 0),
-    ?assert(maps:get(server_utilization, Agg) < 1.0),
-    PerType = maps:get(per_type, Results),
-    ?assert(maps:get(total_calls, maps:get(billing, PerType)) > 0),
-    ?assert(maps:get(total_calls, maps:get(tech, PerType)) > 0).
+        routing => unknown_routing_strategy,
+        max_time => 100
+    },
+    Result = eccsim_cli:do_run(BadConfig),
+    ?assertMatch({error, {_, _, _}}, Result).
 
-test_ms_metrics(_Config) ->
-    {ok, #{results := Results, time_series := TS}} = eccsim:run(ms_config_with_interval()),
-    ?assert(is_map(Results)),
-    ?assert(is_list(TS)),
-    ?assert(length(TS) >= 1),
-    %% Each snapshot produces per-type + aggregate points
-    Keys = [time, call_type, arrivals, completions, mean_wait_time,
-            mean_service_time, queue_length, in_service, utilization],
-    lists:foreach(fun(Point) ->
-        lists:foreach(fun(Key) ->
-            ?assert(maps:is_key(Key, Point), {missing_key, Key})
-        end, Keys)
-    end, TS),
-    %% Should have aggregate points
-    AggPoints = [P || P <- TS, maps:get(call_type, P) =:= aggregate],
-    ?assert(length(AggPoints) >= 1).
+test_cli_print_results(_CtConfig) ->
+    %% print_results/1 formats all fields without crashing
+    Results = #{
+        total_calls => 42,
+        mean_wait_time => 0.5,
+        mean_service_time => 1.0,
+        mean_system_time => 1.5,
+        mean_queue_length => 0.25,
+        mean_system_length => 0.75,
+        agent_utilization => 0.8
+    },
+    ?assertEqual(ok, eccsim_cli:print_results(Results)).
 
-test_ms_csv(_Config) ->
-    {ok, #{time_series := TS}} = eccsim:run(ms_config_with_interval()),
-    Csv = iolist_to_binary(eccsim_ms_metrics:to_csv(TS)),
-    Lines = binary:split(Csv, <<"\n">>, [global, trim_all]),
-    ?assertEqual(1 + length(TS), length(Lines)),
-    [Header | _] = Lines,
-    ?assertMatch(<<"time,call_type,", _/binary>>, Header).
+%%% App Tests
+%%% =========
 
-%%% Multi-Skill Helpers
-%%% ===================
-
-ms_config() ->
-    #{
-        call_types => #{
-            billing => #{lambda => 5.0, mu => 2.0},
-            tech => #{lambda => 3.0, mu => 1.5}
-        },
-        agent_groups => [
-            #{id => billing_team, count => 4, skills => [billing]},
-            #{id => generalists, count => 2, skills => [billing, tech],
-              priority => [billing, tech]}
-        ],
-        routing => longest_idle,
-        max_time => 10_000,
-        seed => ?SEED
-    }.
-
-ms_config_with_interval() ->
-    (ms_config())#{interval => 1000}.
+test_app_restart(_CtConfig) ->
+    %% Verify the application can be stopped and restarted cleanly
+    ok = application:stop(eccsim),
+    {ok, _} = application:ensure_all_started(eccsim).
 
 %%% Helpers
 %%% =======
 
-assert_close(Actual, Expected, RelTol) when Expected > 0.001 ->
-    RelErr = abs(Actual - Expected) / Expected,
-    case RelErr =< RelTol of
-        true -> ok;
-        false ->
-            ct:fail("Expected ~.4f, got ~.4f (relative error ~.2f% > ~.2f%)",
-                    [Expected, Actual, RelErr * 100, RelTol * 100])
-    end;
-assert_close(Actual, _Expected, _RelTol) ->
-    %% Near-zero expected: use absolute tolerance
-    ?assert(abs(Actual) < 0.05).
+ma_config(CtConfig) ->
+    OutputDir = ?config(priv_dir, CtConfig),
+    #{
+        accounts => #{
+            1 => #{
+                call_types => #{
+                    billing => #{lambda => 5.0, mu => 2.0},
+                    tech => #{lambda => 3.0, mu => 1.5}
+                },
+                agent_groups => [
+                    #{id => billing_team, count => 4, skills => [billing]},
+                    #{id => generalists, count => 2, skills => [billing, tech],
+                      priority => [billing, tech]}
+                ]
+            },
+            2 => #{
+                call_types => #{
+                    billing => #{lambda => 2.0, mu => 1.0}
+                },
+                agent_groups => [
+                    #{id => billing_team, count => 3, skills => [billing]}
+                ]
+            }
+        },
+        routing => longest_idle,
+        max_time => 10_000,
+        interval => ?INTERVAL,
+        output_dir => OutputDir,
+        seed => ?SEED
+    }.

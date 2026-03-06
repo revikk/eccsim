@@ -1,6 +1,10 @@
 -module(eccsim_ms_metrics).
 
--export([build/5, to_csv/1]).
+-moduledoc "Time-series metrics builder and CSV exporter for multi-skill simulations.
+Buckets completed call records by interval snapshot, computes per-type and
+aggregate metrics, and renders them as CSV rows.".
+
+-export([build/5, ma_to_csv/1]).
 
 -include("eccsim.hrl").
 
@@ -13,7 +17,7 @@
     mean_service_time := float(),
     queue_length := float(),
     in_service := float(),
-    utilization := float()
+    agent_utilization := float()
 }.
 
 -export_type([ms_metric_point/0, ms_snapshot/0, ms_call_record/0]).
@@ -24,8 +28,35 @@ build(Snapshots, Completed, Interval, TypeNames, TotalAgents) ->
     BucketMap = bucket_calls(Completed, Interval),
     build_points(Snapshots, BucketMap, Interval, TypeNames, TotalAgents, []).
 
-%%% Internal
-%%% ========
+%%% Multi-account CSV
+%%% =================
+
+-define(MA_CSV_HEADER, "time,account,call_type,arrivals,completions,mean_wait_time,"
+    "mean_service_time,queue_length,in_service,agent_utilization\n").
+
+-spec ma_to_csv([{term(), [ms_metric_point()]}]) -> iodata().
+ma_to_csv(AccountTimeSeries) ->
+    [?MA_CSV_HEADER | lists:flatmap(fun({AccountId, TS}) ->
+        lists:map(fun(P) -> ma_point_to_csv_row(AccountId, P) end, TS)
+    end, AccountTimeSeries)].
+
+-spec ma_point_to_csv_row(term(), ms_metric_point()) -> iodata().
+ma_point_to_csv_row(AccountId, P) ->
+    io_lib:format("~.2f,~w,~s,~B,~B,~.6f,~.6f,~.2f,~.2f,~.6f~n", [
+        maps:get(time, P),
+        AccountId,
+        maps:get(call_type, P),
+        maps:get(arrivals, P),
+        maps:get(completions, P),
+        maps:get(mean_wait_time, P),
+        maps:get(mean_service_time, P),
+        maps:get(queue_length, P),
+        maps:get(in_service, P),
+        maps:get(agent_utilization, P)
+    ]).
+
+%%% Internal — time-series build
+%%% ============================
 
 -spec build_points([ms_snapshot()], map(), number(), [atom()], pos_integer(), [ms_metric_point()]) ->
     [ms_metric_point()].
@@ -52,7 +83,7 @@ build_type_points(Snap, BucketKey, BucketMap, TypeNames) ->
             mean_service_time => safe_div(ServiceSum, Completions),
             queue_length => float(QLens),
             in_service => float(InSvc),
-            utilization => 0.0
+            agent_utilization => 0.0
         }
     end, TypeNames).
 
@@ -75,7 +106,7 @@ build_aggregate_point(Snap, TypePoints, TotalAgents) ->
         mean_service_time => safe_div(TotalSvc, TotalComp),
         queue_length => float(TotalQLens),
         in_service => float(TotalInSvc),
-        utilization => TotalInSvc / (TotalAgents * 1.0)
+        agent_utilization => TotalInSvc / (TotalAgents * 1.0)
     }.
 
 -spec get_bucket(non_neg_integer(), atom(), map()) ->
@@ -108,24 +139,3 @@ bucket_key(Time, Interval) ->
 -spec safe_div(float(), non_neg_integer()) -> float().
 safe_div(_Num, 0) -> 0.0;
 safe_div(Num, Den) -> Num / Den.
-
--define(CSV_HEADER, "time,call_type,arrivals,completions,mean_wait_time,mean_service_time,"
-    "queue_length,in_service,utilization\n").
-
--spec to_csv([ms_metric_point()]) -> iodata().
-to_csv(TimeSeries) ->
-    [?CSV_HEADER | lists:map(fun point_to_csv_row/1, TimeSeries)].
-
--spec point_to_csv_row(ms_metric_point()) -> iodata().
-point_to_csv_row(P) ->
-    io_lib:format("~.2f,~s,~B,~B,~.6f,~.6f,~.2f,~.2f,~.6f~n", [
-        maps:get(time, P),
-        maps:get(call_type, P),
-        maps:get(arrivals, P),
-        maps:get(completions, P),
-        maps:get(mean_wait_time, P),
-        maps:get(mean_service_time, P),
-        maps:get(queue_length, P),
-        maps:get(in_service, P),
-        maps:get(utilization, P)
-    ]).

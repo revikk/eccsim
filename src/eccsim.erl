@@ -1,24 +1,41 @@
 -module(eccsim).
 
--export([run/1]).
+-moduledoc "Erlang Call Center Simulator — public API.
+Call `run/1` with a multi-account configuration map to run a discrete-event
+simulation and return per-account and aggregate performance metrics.".
+
+-export([run/1, aggregate/1]).
 
 -include("eccsim.hrl").
 -include_lib("etiq/include/etiq.hrl").
 
--opaque mq_config() :: #{
-    queues := #{atom() => #{lambda := float(), mu := float(), c := pos_integer()}},
-    max_time := number(),
-    seed => rand:seed(),
-    interval => number()
-}.
+%% Dialyzer: seed_events are constructed as #event{} records (etiq.hrl record),
+%% which dialyzer sees as violating etiq_handler:event() opaque type.
+%% etiq provides no constructor function; direct record use is the intended API.
+-dialyzer({no_opaque, start_account_sims/6}).
+%% Dialyzer: build_account_ts/2 undefined clause is reachable at runtime
+%% (when interval is omitted from config) but dialyzer's success-typing misses it.
+-dialyzer({no_match, build_account_ts/2}).
 
--opaque ms_config_input() :: #{
-    call_types := #{atom() => #{lambda := float(), mu := float()}},
-    agent_groups := [#{id := term(), count := pos_integer(), skills := [atom()]}],
+-opaque config() :: #{
+    accounts := #{term() => #{
+        call_types := #{atom() => #{lambda := float(), mu := float()}},
+        agent_groups := [#{id := term(), count := pos_integer(), skills := [atom()]}]
+    }},
     routing := atom(),
     max_time := number(),
-    seed => rand:seed(),
-    interval => number()
+    interval => number(),
+    output_dir => string(),
+    seed => {pos_integer(), pos_integer(), pos_integer()}
+}.
+
+-opaque type_results() :: #{
+    total_calls := non_neg_integer(),
+    mean_wait_time := float(),
+    mean_service_time := float(),
+    mean_system_time := float(),
+    mean_queue_length := float(),
+    offered_load := float()
 }.
 
 -opaque results() :: #{
@@ -28,120 +45,103 @@
     mean_system_time := float(),
     mean_queue_length := float(),
     mean_system_length := float(),
-    server_utilization := float()
+    agent_utilization := float()
 }.
 
--opaque mq_results() :: #{
-    per_queue := #{atom() => results()},
+-opaque account_results() :: #{
+    per_type := #{atom() => type_results()},
     aggregate := results()
 }.
 
--opaque ms_results() :: #{
-    per_type := #{atom() => results()},
+-opaque run_result() :: {ok, #{
+    per_account := #{term() => account_results()},
     aggregate := results()
-}.
+}}.
 
--type run_result() ::
-    {ok, mq_results()} |
-    {ok, #{results := mq_results(), time_series := [eccsim_metrics:mq_metric_point()]}} |
-    {ok, ms_results()} |
-    {ok, #{results := ms_results(), time_series := [eccsim_ms_metrics:ms_metric_point()]}}.
+-export_type([config/0, type_results/0, results/0, account_results/0, run_result/0]).
 
--export_type([mq_config/0, ms_config_input/0, results/0, mq_results/0, ms_results/0, run_result/0]).
-
--spec run(mq_config() | ms_config_input()) -> run_result().
-run(#{call_types := _} = Config) ->
-    run_multi_skill(Config);
-run(#{queues := _} = Config) ->
-    run_multi_queue(Config).
-
-%%% Multi-queue M/M/c
-%%% =================
-
--spec run_multi_queue(mq_config()) -> run_result().
-run_multi_queue(Config) ->
-    #{queues := Queues, max_time := MaxTime} = Config,
+-spec run(config()) -> run_result().
+run(#{accounts := Accounts, routing := Routing, max_time := MaxTime} = Config) ->
     BaseSeed = maps:get(seed, Config, default_seed()),
     Interval = maps:get(interval, Config, undefined),
-    QueueNames = lists:sort(maps:keys(Queues)),
-    Seeds = derive_seeds(BaseSeed, QueueNames),
-    Sims = start_sims(QueueNames, Queues, Seeds, MaxTime, Interval),
+    OutputDir = maps:get(output_dir, Config, undefined),
+    AccountIds = lists:sort(maps:keys(Accounts)),
+    Seeds = derive_seeds(BaseSeed, AccountIds),
+    Sims = start_account_sims(AccountIds, Accounts, Seeds, Routing, MaxTime, Interval),
     FinalStates = run_sims_parallel(Sims),
     stop_sims(Sims),
-    PerQueue = build_per_queue_results(QueueNames, FinalStates, Queues),
-    Aggregate = build_aggregate(PerQueue, MaxTime, Queues),
-    MqResults = #{per_queue => PerQueue, aggregate => Aggregate},
-    format_mq_result(MqResults, QueueNames, FinalStates, Interval, Queues).
+    {PerAccount, AccountTS} = build_account_results(AccountIds, FinalStates, Interval),
+    maybe_write_csv(AccountTS, OutputDir),
+    Aggregate = build_aggregate(PerAccount, MaxTime, Accounts),
+    {ok, #{per_account => PerAccount, aggregate => Aggregate}}.
 
--spec derive_seeds(rand:seed(), [atom()]) -> #{atom() => rand:seed()}.
-derive_seeds(BaseSeed, QueueNames) ->
-    {Seeds, _} = lists:foldl(fun(Name, {Acc, Idx}) ->
+-doc "Extract the aggregate results from a run_result().".
+-spec aggregate(run_result()) -> results().
+aggregate({ok, #{aggregate := Agg}}) ->
+    Agg.
+
+%%% Account orchestration
+%%% =====================
+
+-spec derive_seeds({pos_integer(), pos_integer(), pos_integer()}, [term()]) ->
+    #{term() => {pos_integer(), pos_integer(), pos_integer()}}.
+derive_seeds(BaseSeed, AccountIds) ->
+    {Seeds, _} = lists:foldl(fun(Id, {Acc, Idx}) ->
         Seed = offset_seed(BaseSeed, Idx),
-        {maps:put(Name, Seed, Acc), Idx + 1}
-    end, {#{}, 0}, QueueNames),
+        {maps:put(Id, Seed, Acc), Idx + 1}
+    end, {#{}, 0}, AccountIds),
     Seeds.
 
--spec offset_seed(rand:seed(), non_neg_integer()) -> rand:seed().
+-spec offset_seed({pos_integer(), pos_integer(), pos_integer()}, non_neg_integer()) ->
+    {pos_integer(), pos_integer(), pos_integer()}.
 offset_seed({S1, S2, S3}, Offset) ->
     {S1 + Offset, S2, S3}.
 
--spec start_sims([atom()], map(), #{atom() => rand:seed()}, number(), number() | undefined) ->
-    [{atom(), pid()}].
-start_sims(QueueNames, Queues, Seeds, MaxTime, Interval) ->
-    lists:map(fun(Name) ->
-        #{lambda := Lambda, mu := Mu, c := C} = maps:get(Name, Queues),
-        Rho = Lambda / (C * Mu),
-        true = Rho < 1.0,
-        QConfig = #eccsim_config{lambda = Lambda, mu = Mu, c = C, max_time = MaxTime},
-        State = init_queue_state(QConfig, maps:get(Name, Seeds), Interval),
-        SimConfig = #sim_config{handler = eccsim_handler, handler_state = State, max_time = MaxTime},
-        {ok, Pid} = etiq_sup:start_sim(SimConfig),
-        ok = etiq_gen:schedule(Pid, #event{time = 0, type = customer_arrival}),
-        {Name, Pid}
-    end, QueueNames).
+-spec start_account_sims([term()], map(), map(), atom(), number(), number() | undefined) ->
+    [{term(), pid()}].
+start_account_sims(AccountIds, Accounts, Seeds, Routing, MaxTime, Interval) ->
+    lists:map(fun(Id) ->
+        Account = maps:get(Id, Accounts),
+        MsInput = Account#{routing => Routing, max_time => MaxTime},
+        MsConfig = parse_ms_config(MsInput),
+        Seed = maps:get(Id, Seeds),
+        State = init_ms_state(MsConfig, Seed, Interval),
+        SimConfig = #sim_config{
+            handler = eccsim_ms_handler,
+            handler_state = State,
+            max_time = MaxTime
+        },
+        SeedEvents = [#event{time = 0, type = ms_call_arrival, data = T}
+                      || T <- maps:keys(MsConfig#ms_config.call_types)],
+        Args = #{sim_config => SimConfig, seed_events => SeedEvents},
+        {ok, Pid} = eccsim_sup:start_sim(Args),
+        {Id, Pid}
+    end, AccountIds).
 
--spec init_queue_state(eccsim_config(), rand:seed(), number() | undefined) -> eccsim_state().
-init_queue_state(Config, Seed, Interval) ->
-    NextSnapshot = case Interval of undefined -> undefined; _ -> Interval end,
-    #eccsim_state{
-        config = Config,
-        queue = queue:new(),
-        queue_len = 0,
-        in_service = #{},
-        completed = [],
-        rand_state = rand:seed_s(exsss, Seed),
-        last_event_time = 0.0,
-        queue_area = 0.0,
-        system_area = 0.0,
-        interval = Interval,
-        next_snapshot = NextSnapshot,
-        snapshots = []
-    }.
-
--spec run_sims_parallel([{atom(), pid()}]) -> #{atom() => eccsim_state()}.
+-spec run_sims_parallel([{term(), pid()}]) -> #{term() => ms_state()}.
 run_sims_parallel(Sims) ->
     Parent = self(),
-    Runners = lists:map(fun({Name, Pid}) ->
+    Runners = lists:map(fun({Id, Pid}) ->
         Ref = make_ref(),
         spawn_link(fun() ->
-            {ok, FinalState} = etiq_gen:run(Pid),
-            Parent ! {Ref, Name, FinalState}
+            {ok, FinalState} = eccsim_sim:await(Pid, 600_000),
+            Parent ! {Ref, Id, FinalState}
         end),
-        {Ref, Name}
+        {Ref, Id}
     end, Sims),
     collect_results(Runners, #{}).
 
--spec collect_results([{reference(), atom()}], #{atom() => eccsim_state()}) ->
-    #{atom() => eccsim_state()}.
+-spec collect_results([{reference(), term()}], #{term() => ms_state()}) ->
+    #{term() => ms_state()}.
 collect_results([], Acc) ->
     Acc;
 collect_results(Runners, Acc) ->
     receive
-        {Ref, Name, State} ->
+        {Ref, Id, State} ->
             case lists:keymember(Ref, 1, Runners) of
                 true ->
                     Remaining = lists:keydelete(Ref, 1, Runners),
-                    collect_results(Remaining, maps:put(Name, assert_eccsim_state(State), Acc));
+                    collect_results(Remaining, maps:put(Id, assert_ms_state(State), Acc));
                 false ->
                     collect_results(Runners, Acc)
             end
@@ -149,128 +149,83 @@ collect_results(Runners, Acc) ->
         error(timeout)
     end.
 
--spec stop_sims([{atom(), pid()}]) -> ok.
+-spec stop_sims([{term(), pid()}]) -> ok.
 stop_sims(Sims) ->
-    lists:foreach(fun({_Name, Pid}) -> ok = etiq_sup:stop_sim(Pid) end, Sims).
+    lists:foreach(fun({_Id, Pid}) -> eccsim_sup:stop_sim(Pid) end, Sims).
 
--spec build_per_queue_results([atom()], #{atom() => eccsim_state()}, map()) ->
-    #{atom() => results()}.
-build_per_queue_results(QueueNames, FinalStates, Queues) ->
-    maps:from_list(lists:map(fun(Name) ->
-        State = maps:get(Name, FinalStates),
-        {Name, queue_results(State, maps:get(Name, Queues))}
-    end, QueueNames)).
+%%% Results
+%%% =======
 
--spec queue_results(eccsim_state(), map()) -> results().
-queue_results(#eccsim_state{completed = []}, _QueueDef) ->
-    empty_results();
-queue_results(State, _QueueDef) ->
-    #eccsim_state{completed = Completed, config = Config} = State,
-    MaxTime = Config#eccsim_config.max_time,
-    C = Config#eccsim_config.c,
-    {WaitSum, ServiceSum, SystemSum} = sum_times(Completed),
-    N = length(Completed),
-    #{
-        total_calls => N,
-        mean_wait_time => WaitSum / N,
-        mean_service_time => ServiceSum / N,
-        mean_system_time => SystemSum / N,
-        mean_queue_length => State#eccsim_state.queue_area / MaxTime,
-        mean_system_length => State#eccsim_state.system_area / MaxTime,
-        server_utilization => ServiceSum / (C * MaxTime)
-    }.
+-spec build_account_results([term()], #{term() => ms_state()}, number() | undefined) ->
+    {#{term() => account_results()}, [{term(), [eccsim_ms_metrics:ms_metric_point()]}]}.
+build_account_results(AccountIds, FinalStates, Interval) ->
+    lists:foldl(fun(Id, {ResAcc, TsAcc}) ->
+        State = maps:get(Id, FinalStates),
+        AccountRes = ms_results(State),
+        TS = build_account_ts(State, Interval),
+        {maps:put(Id, AccountRes, ResAcc), [{Id, TS} | TsAcc]}
+    end, {#{}, []}, AccountIds).
 
--spec build_aggregate(#{atom() => results()}, number(), map()) -> results().
-build_aggregate(PerQueue, MaxTime, Queues) ->
-    Items = maps:to_list(PerQueue),
-    TotalCalls = lists:sum([maps:get(total_calls, R) || {_, R} <- Items]),
+-spec build_account_ts(ms_state(), number() | undefined) -> [eccsim_ms_metrics:ms_metric_point()].
+build_account_ts(_State, undefined) ->
+    [];
+build_account_ts(State, Interval) ->
+    #ms_state{snapshots = Snaps, completed = Completed} = State,
+    TypeNames = maps:keys(State#ms_state.config#ms_config.call_types),
+    TotalAgents = agent_count(State),
+    eccsim_ms_metrics:build(lists:reverse(Snaps), Completed, Interval, TypeNames, TotalAgents).
+
+-spec build_aggregate(#{term() => account_results()}, number(), map()) -> results().
+build_aggregate(PerAccount, MaxTime, Accounts) ->
+    Items = maps:to_list(PerAccount),
+    TotalCalls = lists:sum([maps:get(total_calls, maps:get(aggregate, R)) || {_, R} <- Items]),
     case TotalCalls of
         0 -> empty_results();
         _ ->
-            TotalServers = lists:sum([maps:get(c, maps:get(Q, Queues)) || {Q, _} <- Items]),
-            WaitSum = weighted_sum(Items, mean_wait_time),
-            SvcSum = weighted_sum(Items, mean_service_time),
-            SysSum = weighted_sum(Items, mean_system_time),
+            TotalAgents = maps:fold(fun(_Id, Acct, Acc) ->
+                Groups = maps:get(agent_groups, Acct),
+                Acc + lists:sum([maps:get(count, G) || G <- Groups])
+            end, 0, Accounts),
+            Aggs = [{Id, maps:get(aggregate, R)} || {Id, R} <- Items],
+            WaitSum = weighted_sum(Aggs, mean_wait_time),
+            SvcSum = weighted_sum(Aggs, mean_service_time),
+            SysSum = weighted_sum(Aggs, mean_system_time),
             TotalServiceTime = lists:sum([
-                maps:get(mean_service_time, R) * maps:get(total_calls, R) || {_, R} <- Items
+                maps:get(mean_service_time, A) * maps:get(total_calls, A) || {_, A} <- Aggs
             ]),
             #{
                 total_calls => TotalCalls,
                 mean_wait_time => WaitSum / TotalCalls,
                 mean_service_time => SvcSum / TotalCalls,
                 mean_system_time => SysSum / TotalCalls,
-                mean_queue_length => lists:sum([maps:get(mean_queue_length, R) || {_, R} <- Items]),
-                mean_system_length => lists:sum([maps:get(mean_system_length, R) || {_, R} <- Items]),
-                server_utilization => TotalServiceTime / (TotalServers * MaxTime)
+                mean_queue_length => lists:sum([maps:get(mean_queue_length, A) || {_, A} <- Aggs]),
+                mean_system_length => lists:sum([maps:get(mean_system_length, A) || {_, A} <- Aggs]),
+                agent_utilization => TotalServiceTime / (TotalAgents * MaxTime)
             }
     end.
 
--spec weighted_sum([{atom(), results()}], atom()) -> float().
+-spec weighted_sum([{term(), results()}], atom()) -> float().
 weighted_sum(Items, Key) ->
     lists:sum([maps:get(Key, R) * maps:get(total_calls, R) || {_, R} <- Items]).
 
--spec format_mq_result(mq_results(), [atom()], #{atom() => eccsim_state()},
-    number() | undefined, map()) -> run_result().
-format_mq_result(MqResults, _QueueNames, _FinalStates, undefined, _Queues) ->
-    {ok, MqResults};
-format_mq_result(MqResults, QueueNames, FinalStates, Interval, Queues) ->
-    PerQueueData = lists:map(fun(Name) ->
-        State = maps:get(Name, FinalStates),
-        #eccsim_state{snapshots = Snaps, completed = Completed, config = Cfg} = State,
-        C = Cfg#eccsim_config.c,
-        Series = eccsim_metrics:build(lists:reverse(Snaps), Completed, Interval, C),
-        {Name, Series}
-    end, QueueNames),
-    TotalAgents = lists:sum([maps:get(c, maps:get(Q, Queues)) || Q <- QueueNames]),
-    TimeSeries = eccsim_metrics:build_mq(PerQueueData, TotalAgents),
-    {ok, #{results => MqResults, time_series => TimeSeries}}.
+%%% CSV output
+%%% ==========
 
--spec sum_times([call_record()]) -> {float(), float(), float()}.
-sum_times(Records) ->
-    sum_call_times(fun(#call_record{arrival_time = A, service_start = S, service_end = E}) ->
-        {A, S, E}
-    end, Records).
+-spec maybe_write_csv([{term(), [eccsim_ms_metrics:ms_metric_point()]}], string() | undefined) -> ok.
+maybe_write_csv(_AccountTS, undefined) ->
+    ok;
+maybe_write_csv(AccountTS, OutputDir) ->
+    ok = filelib:ensure_dir(filename:join(OutputDir, "x")),
+    Path = filename:join(OutputDir, "eccsim_metrics.csv"),
+    CsvData = eccsim_ms_metrics:ma_to_csv(AccountTS),
+    ok = file:write_file(Path, CsvData).
 
--spec empty_results() -> results().
-empty_results() ->
-    #{
-        total_calls => 0, mean_wait_time => 0.0, mean_service_time => 0.0,
-        mean_system_time => 0.0, mean_queue_length => 0.0,
-        mean_system_length => 0.0, server_utilization => 0.0
-    }.
+%%% Multi-skill config parsing
+%%% ==========================
 
--spec default_seed() -> {pos_integer(), pos_integer(), pos_integer()}.
-default_seed() ->
-    {12345, 67890, 11121}.
-
--spec assert_eccsim_state(term()) -> eccsim_state().
-assert_eccsim_state(State) when is_record(State, eccsim_state) ->
-    State.
-
-%%% Multi-skill internals
-%%% =====================
-
--spec run_multi_skill(ms_config_input()) -> run_result().
-run_multi_skill(Config) ->
-    MsConfig = parse_ms_config(Config),
-    Seed = maps:get(seed, Config, default_seed()),
-    Interval = maps:get(interval, Config, undefined),
-    State = init_ms_state(MsConfig, Seed, Interval),
-    SimConfig = #sim_config{
-        handler = eccsim_ms_handler,
-        handler_state = State,
-        max_time = MsConfig#ms_config.max_time
-    },
-    {ok, Pid} = etiq_sup:start_sim(SimConfig),
-    SeedEvents = [#event{time = 0, type = ms_call_arrival, data = T} || T <- maps:keys(MsConfig#ms_config.call_types)],
-    ok = etiq_gen:schedule(Pid, SeedEvents),
-    {ok, FinalState0} = etiq_gen:run(Pid),
-    ok = etiq_sup:stop_sim(Pid),
-    FinalState = assert_ms_state(FinalState0),
-    format_ms_result(FinalState).
-
--spec parse_ms_config(ms_config_input()) -> ms_config().
-parse_ms_config(#{call_types := RawTypes, agent_groups := Groups, routing := Routing, max_time := MaxTime}) ->
+-spec parse_ms_config(map()) -> ms_config().
+parse_ms_config(#{call_types := RawTypes, agent_groups := Groups, routing := Routing,
+                   max_time := MaxTime}) ->
     CallTypes = maps:map(fun(Name, #{lambda := L, mu := M}) ->
         #call_type_config{name = Name, lambda = L, mu = M}
     end, RawTypes),
@@ -299,13 +254,16 @@ expand_one_group(#{id := Id, count := Count, skills := Skills} = Group, AllTypes
 default_priority(Skills, AllTypes) ->
     [T || T <- AllTypes, lists:member(T, Skills)].
 
--spec init_ms_state(ms_config(), rand:seed(), number() | undefined) -> ms_state().
+%%% Multi-skill state
+%%% =================
+
+-spec init_ms_state(ms_config(), {pos_integer(), pos_integer(), pos_integer()}, number() | undefined) -> ms_state().
 init_ms_state(Config, Seed, Interval) ->
     TypeNames = maps:keys(Config#ms_config.call_types),
     Queues = maps:from_list([{T, queue:new()} || T <- TypeNames]),
     QueueLens = maps:from_list([{T, 0} || T <- TypeNames]),
     QueueAreas = maps:from_list([{T, 0.0} || T <- TypeNames]),
-    NextSnapshot = case Interval of undefined -> undefined; _ -> Interval end,
+    NextSnapshot = Interval,
     #ms_state{
         config = Config,
         queues = Queues,
@@ -322,22 +280,10 @@ init_ms_state(Config, Seed, Interval) ->
         snapshots = []
     }.
 
--spec assert_ms_state(term()) -> ms_state().
-assert_ms_state(State) when is_record(State, ms_state) ->
-    State.
+%%% Multi-skill results
+%%% ===================
 
--spec format_ms_result(ms_state()) -> run_result().
-format_ms_result(#ms_state{interval = undefined} = State) ->
-    {ok, ms_results(State)};
-format_ms_result(State) ->
-    Results = ms_results(State),
-    #ms_state{snapshots = Snaps, completed = Completed} = State,
-    Interval = State#ms_state.interval,
-    TypeNames = maps:keys(State#ms_state.config#ms_config.call_types),
-    TimeSeries = eccsim_ms_metrics:build(lists:reverse(Snaps), Completed, Interval, TypeNames, agent_count(State)),
-    {ok, #{results => Results, time_series => TimeSeries}}.
-
--spec ms_results(ms_state()) -> ms_results().
+-spec ms_results(ms_state()) -> account_results().
 ms_results(State) ->
     #ms_state{completed = Completed, config = Config} = State,
     MaxTime = Config#ms_config.max_time,
@@ -346,7 +292,7 @@ ms_results(State) ->
     Aggregate = ms_aggregate_results(Completed, MaxTime, TotalAgents, State),
     #{per_type => PerType, aggregate => Aggregate}.
 
--spec ms_per_type_results([ms_call_record()], ms_state()) -> #{atom() => results()}.
+-spec ms_per_type_results([ms_call_record()], ms_state()) -> #{atom() => type_results()}.
 ms_per_type_results(Completed, State) ->
     #ms_state{config = Config} = State,
     MaxTime = Config#ms_config.max_time,
@@ -358,9 +304,9 @@ ms_per_type_results(Completed, State) ->
         {T, type_results(Records, QueueArea, MaxTime)}
     end, TypeNames)).
 
--spec type_results([ms_call_record()], float(), number()) -> results().
+-spec type_results([ms_call_record()], float(), number()) -> type_results().
 type_results([], _QueueArea, _MaxTime) ->
-    empty_results();
+    empty_type_results();
 type_results(Records, QueueArea, MaxTime) ->
     {WaitSum, ServiceSum, SystemSum} = ms_sum_times(Records),
     N = length(Records),
@@ -370,8 +316,7 @@ type_results(Records, QueueArea, MaxTime) ->
         mean_service_time => ServiceSum / N,
         mean_system_time => SystemSum / N,
         mean_queue_length => QueueArea / MaxTime,
-        mean_system_length => 0.0,
-        server_utilization => ServiceSum / MaxTime
+        offered_load => ServiceSum / MaxTime
     }.
 
 -spec ms_aggregate_results([ms_call_record()], number(), pos_integer(), ms_state()) -> results().
@@ -387,8 +332,11 @@ ms_aggregate_results(Completed, MaxTime, TotalAgents, State) ->
         mean_system_time => SystemSum / N,
         mean_queue_length => total_queue_area(State) / MaxTime,
         mean_system_length => State#ms_state.system_area / MaxTime,
-        server_utilization => ServiceSum / (TotalAgents * MaxTime)
+        agent_utilization => ServiceSum / (TotalAgents * MaxTime)
     }.
+
+%%% Helpers
+%%% =======
 
 -spec ms_sum_times([ms_call_record()]) -> {float(), float(), float()}.
 ms_sum_times(Records) ->
@@ -417,3 +365,26 @@ total_queue_area(State) ->
 -spec agent_count(ms_state()) -> pos_integer().
 agent_count(State) ->
     length(State#ms_state.config#ms_config.agents).
+
+-spec assert_ms_state(term()) -> ms_state().
+assert_ms_state(State) when is_record(State, ms_state) ->
+    State.
+
+-spec empty_type_results() -> type_results().
+empty_type_results() ->
+    #{
+        total_calls => 0, mean_wait_time => 0.0, mean_service_time => 0.0,
+        mean_system_time => 0.0, mean_queue_length => 0.0, offered_load => 0.0
+    }.
+
+-spec empty_results() -> results().
+empty_results() ->
+    #{
+        total_calls => 0, mean_wait_time => 0.0, mean_service_time => 0.0,
+        mean_system_time => 0.0, mean_queue_length => 0.0,
+        mean_system_length => 0.0, agent_utilization => 0.0
+    }.
+
+-spec default_seed() -> {pos_integer(), pos_integer(), pos_integer()}.
+default_seed() ->
+    {12345, 67890, 11121}.
