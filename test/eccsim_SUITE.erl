@@ -84,12 +84,10 @@ test_ma_independent_accounts(CtConfig) ->
     {ok, Results} = eccsim:run(#{
         accounts => #{
             1 => #{
-                call_types => #{q1 => #{lambda => 2.0, mu => 1.0}},
-                agent_groups => [#{id => t1, count => 3, skills => [q1]}]
+                queues => #{q1 => #{lambda => 2.0, mu => 1.0, agents => [t1, t2, t3]}}
             },
             2 => #{
-                call_types => #{q1 => #{lambda => 0.7, mu => 1.0}},
-                agent_groups => [#{id => t1, count => 1, skills => [q1]}]
+                queues => #{q1 => #{lambda => 0.7, mu => 1.0, agents => [t1]}}
             }
         },
         routing => longest_idle,
@@ -116,14 +114,12 @@ test_ma_shared_agents(CtConfig) ->
     {ok, Results} = eccsim:run(#{
         accounts => #{
             1 => #{
-                call_types => #{
-                    billing => #{lambda => 2.0, mu => 1.0},
-                    tech => #{lambda => 2.0, mu => 1.0}
-                },
-                agent_groups => [
-                    #{id => generalists, count => 6, skills => [billing, tech],
-                      priority => [billing, tech]}
-                ]
+                queues => #{
+                    billing => #{lambda => 2.0, mu => 1.0,
+                                 agents => [g1, g2, g3, g4, g5, g6]},
+                    tech => #{lambda => 2.0, mu => 1.0,
+                              agents => [g1, g2, g3, g4, g5, g6]}
+                }
             }
         },
         routing => longest_idle,
@@ -154,7 +150,7 @@ test_ma_csv(CtConfig) ->
     Lines = binary:split(Bin, <<"\n">>, [global, trim_all]),
     [Header | DataLines] = Lines,
     ?assertMatch(<<"time,account,call_type,", _/binary>>, Header),
-    ?assert(binary:match(Header, <<"agent_utilization">>) =/= nomatch),
+    ?assertEqual(nomatch, binary:match(Header, <<"agent_utilization">>)),
     ?assert(length(DataLines) > 0).
 
 test_ma_no_interval(CtConfig) ->
@@ -163,8 +159,7 @@ test_ma_no_interval(CtConfig) ->
     {ok, Results} = eccsim:run(#{
         accounts => #{
             1 => #{
-                call_types => #{q1 => #{lambda => 1.0, mu => 1.0}},
-                agent_groups => [#{id => t1, count => 2, skills => [q1]}]
+                queues => #{q1 => #{lambda => 1.0, mu => 1.0, agents => [t1, t2]}}
             }
         },
         routing => longest_idle,
@@ -179,8 +174,7 @@ test_ma_no_output_dir(CtConfig) ->
     {ok, Results} = eccsim:run(#{
         accounts => #{
             1 => #{
-                call_types => #{q1 => #{lambda => 1.0, mu => 1.0}},
-                agent_groups => [#{id => t1, count => 2, skills => [q1]}]
+                queues => #{q1 => #{lambda => 1.0, mu => 1.0, agents => [t1, t2]}}
             }
         },
         routing => longest_idle,
@@ -202,8 +196,7 @@ test_cli_do_run_success(CtConfig) ->
     Config = #{
         accounts => #{
             1 => #{
-                call_types => #{q1 => #{lambda => 1.0, mu => 1.0}},
-                agent_groups => [#{id => t1, count => 2, skills => [q1]}]
+                queues => #{q1 => #{lambda => 1.0, mu => 1.0, agents => [t1, t2]}}
             }
         },
         routing => longest_idle,
@@ -221,8 +214,7 @@ test_cli_do_run_bad_config(_CtConfig) ->
     BadConfig = #{
         accounts => #{
             1 => #{
-                call_types => #{q1 => #{lambda => 1.0, mu => 1.0}},
-                agent_groups => [#{id => t1, count => 1, skills => [q1]}]
+                queues => #{q1 => #{lambda => 1.0, mu => 1.0, agents => [t1]}}
             }
         },
         routing => unknown_routing_strategy,
@@ -260,23 +252,18 @@ ma_config(CtConfig) ->
     #{
         accounts => #{
             1 => #{
-                call_types => #{
-                    billing => #{lambda => 5.0, mu => 2.0},
-                    tech => #{lambda => 3.0, mu => 1.5}
-                },
-                agent_groups => [
-                    #{id => billing_team, count => 4, skills => [billing]},
-                    #{id => generalists, count => 2, skills => [billing, tech],
-                      priority => [billing, tech]}
-                ]
+                queues => #{
+                    billing => #{lambda => 5.0, mu => 2.0,
+                                 agents => [b1, b2, b3, b4, g1, g2]},
+                    tech => #{lambda => 3.0, mu => 1.5,
+                              agents => [g1, g2]}
+                }
             },
             2 => #{
-                call_types => #{
-                    billing => #{lambda => 2.0, mu => 1.0}
-                },
-                agent_groups => [
-                    #{id => billing_team, count => 3, skills => [billing]}
-                ]
+                queues => #{
+                    billing => #{lambda => 2.0, mu => 1.0,
+                                 agents => [b1, b2, b3]}
+                }
             }
         },
         routing => longest_idle,

@@ -19,8 +19,7 @@ simulation and return per-account and aggregate performance metrics.".
 
 -opaque config() :: #{
     accounts := #{term() => #{
-        call_types := #{atom() => #{lambda := float(), mu := float()}},
-        agent_groups := [#{id := term(), count := pos_integer(), skills := [atom()]}]
+        queues := #{atom() => #{lambda := float(), mu := float(), agents := [atom()]}}
     }},
     routing := atom(),
     max_time := number(),
@@ -88,7 +87,7 @@ aggregate({ok, #{aggregate := Agg}}) ->
 derive_seeds(BaseSeed, AccountIds) ->
     {Seeds, _} = lists:foldl(fun(Id, {Acc, Idx}) ->
         Seed = offset_seed(BaseSeed, Idx),
-        {maps:put(Id, Seed, Acc), Idx + 1}
+        {Acc#{Id => Seed}, Idx + 1}
     end, {#{}, 0}, AccountIds),
     Seeds.
 
@@ -115,7 +114,7 @@ start_account_sims(AccountIds, Accounts, Seeds, Routing, MaxTime, Interval) ->
                       || T <- maps:keys(MsConfig#ms_config.call_types)],
         Args = #{sim_config => SimConfig, seed_events => SeedEvents},
         {ok, Pid} = eccsim_sup:start_sim(Args),
-        {Id, Pid}
+        {Id, assert_pid(Pid)}
     end, AccountIds).
 
 -spec run_sims_parallel([{term(), pid()}]) -> #{term() => ms_state()}.
@@ -141,7 +140,7 @@ collect_results(Runners, Acc) ->
             case lists:keymember(Ref, 1, Runners) of
                 true ->
                     Remaining = lists:keydelete(Ref, 1, Runners),
-                    collect_results(Remaining, maps:put(Id, assert_ms_state(State), Acc));
+                    collect_results(Remaining, Acc#{Id => assert_ms_state(State)});
                 false ->
                     collect_results(Runners, Acc)
             end
@@ -163,7 +162,7 @@ build_account_results(AccountIds, FinalStates, Interval) ->
         State = maps:get(Id, FinalStates),
         AccountRes = ms_results(State),
         TS = build_account_ts(State, Interval),
-        {maps:put(Id, AccountRes, ResAcc), [{Id, TS} | TsAcc]}
+        {ResAcc#{Id => AccountRes}, [{Id, TS} | TsAcc]}
     end, {#{}, []}, AccountIds).
 
 -spec build_account_ts(ms_state(), number() | undefined) -> [eccsim_ms_metrics:ms_metric_point()].
@@ -172,8 +171,7 @@ build_account_ts(_State, undefined) ->
 build_account_ts(State, Interval) ->
     #ms_state{snapshots = Snaps, completed = Completed} = State,
     TypeNames = maps:keys(State#ms_state.config#ms_config.call_types),
-    TotalAgents = agent_count(State),
-    eccsim_ms_metrics:build(lists:reverse(Snaps), Completed, Interval, TypeNames, TotalAgents).
+    eccsim_ms_metrics:build(lists:reverse(Snaps), Completed, Interval, TypeNames).
 
 -spec build_aggregate(#{term() => account_results()}, number(), map()) -> results().
 build_aggregate(PerAccount, MaxTime, Accounts) ->
@@ -183,8 +181,9 @@ build_aggregate(PerAccount, MaxTime, Accounts) ->
         0 -> empty_results();
         _ ->
             TotalAgents = maps:fold(fun(_Id, Acct, Acc) ->
-                Groups = maps:get(agent_groups, Acct),
-                Acc + lists:sum([maps:get(count, G) || G <- Groups])
+                Queues = maps:get(queues, Acct),
+                AllAgents = lists:append([maps:get(agents, Q) || Q <- maps:values(Queues)]),
+                Acc + length(lists:usort(AllAgents))
             end, 0, Accounts),
             Aggs = [{Id, maps:get(aggregate, R)} || {Id, R} <- Items],
             WaitSum = weighted_sum(Aggs, mean_wait_time),
@@ -224,31 +223,30 @@ maybe_write_csv(AccountTS, OutputDir) ->
 %%% ==========================
 
 -spec parse_ms_config(map()) -> ms_config().
-parse_ms_config(#{call_types := RawTypes, agent_groups := Groups, routing := Routing,
-                   max_time := MaxTime}) ->
+parse_ms_config(#{queues := RawQueues, routing := Routing, max_time := MaxTime}) ->
     CallTypes = maps:map(fun(Name, #{lambda := L, mu := M}) ->
         #call_type_config{name = Name, lambda = L, mu = M}
-    end, RawTypes),
-    Agents = expand_agent_groups(Groups, maps:keys(CallTypes)),
+    end, RawQueues),
+    Agents = expand_queues(RawQueues, maps:keys(CallTypes)),
     Router = router_module(Routing),
     #ms_config{call_types = CallTypes, agents = Agents, router = Router, max_time = MaxTime}.
 
 -spec router_module(atom()) -> module().
 router_module(longest_idle) -> eccsim_router_longest_idle.
 
--spec expand_agent_groups([map()], [atom()]) -> [agent()].
-expand_agent_groups(Groups, AllTypes) ->
-    lists:flatmap(fun(Group) -> expand_one_group(Group, AllTypes) end, Groups).
-
--spec expand_one_group(map(), [atom()]) -> [agent()].
-expand_one_group(#{id := Id, count := Count, skills := Skills} = Group, AllTypes) ->
-    Priority = maps:get(priority, Group, default_priority(Skills, AllTypes)),
-    [#agent{
-        id = {Id, N},
-        skills = Skills,
-        priority = Priority,
-        idle_since = 0.0
-    } || N <- lists:seq(1, Count)].
+-spec expand_queues(#{atom() => #{agents := [atom()]}}, [atom()]) -> [agent()].
+expand_queues(Queues, AllTypes) ->
+    %% Invert queue -> [agent] to agent -> [skill]
+    AgentSkills = maps:fold(fun(QueueName, #{agents := AgentIds}, Acc) ->
+        lists:foldl(fun(AId, InnerAcc) ->
+            maps:update_with(AId, fun(Skills) -> [QueueName | Skills] end, [QueueName], InnerAcc)
+        end, Acc, AgentIds)
+    end, #{}, Queues),
+    maps:fold(fun(AId, Skills, Acc) ->
+        SortedSkills = lists:sort(Skills),
+        Priority = default_priority(SortedSkills, AllTypes),
+        [#agent{id = AId, skills = SortedSkills, priority = Priority, idle_since = 0.0} | Acc]
+    end, [], AgentSkills).
 
 -spec default_priority([atom()], [atom()]) -> [atom()].
 default_priority(Skills, AllTypes) ->
@@ -260,9 +258,9 @@ default_priority(Skills, AllTypes) ->
 -spec init_ms_state(ms_config(), {pos_integer(), pos_integer(), pos_integer()}, number() | undefined) -> ms_state().
 init_ms_state(Config, Seed, Interval) ->
     TypeNames = maps:keys(Config#ms_config.call_types),
-    Queues = maps:from_list([{T, queue:new()} || T <- TypeNames]),
-    QueueLens = maps:from_list([{T, 0} || T <- TypeNames]),
-    QueueAreas = maps:from_list([{T, 0.0} || T <- TypeNames]),
+    {Queues, QueueLens, QueueAreas} = lists:foldl(fun(T, {QAcc, LAcc, AAcc}) ->
+        {QAcc#{T => queue:new()}, LAcc#{T => 0}, AAcc#{T => 0.0}}
+    end, {#{}, #{}, #{}}, TypeNames),
     NextSnapshot = Interval,
     #ms_state{
         config = Config,
@@ -362,9 +360,9 @@ group_by_type(Records) ->
 total_queue_area(State) ->
     maps:fold(fun(_K, V, Acc) -> Acc + V end, 0.0, State#ms_state.queue_areas).
 
--spec agent_count(ms_state()) -> pos_integer().
-agent_count(State) ->
-    length(State#ms_state.config#ms_config.agents).
+-spec assert_pid(pid() | undefined) -> pid().
+assert_pid(Pid) when is_pid(Pid) ->
+    Pid.
 
 -spec assert_ms_state(term()) -> ms_state().
 assert_ms_state(State) when is_record(State, ms_state) ->

@@ -10,7 +10,6 @@ runs it immediately, and stores the result for retrieval via await/2.".
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -include("eccsim.hrl").
--include_lib("etiq/include/etiq.hrl").
 
 -type state() :: #{
     sim_pid := pid() | undefined,
@@ -52,10 +51,14 @@ handle_call(Request, _From, State) ->
 
 -spec handle_cast(term(), state()) -> {noreply, state()}.
 handle_cast({sim_done, FinalState}, #{sim_pid := SimPid, waiters := Waiters} = State) ->
-    Result = {ok, FinalState},
+    Result = {ok, assert_ms_state(FinalState)},
     lists:foreach(fun(Waiter) -> gen_server:reply(Waiter, Result) end, Waiters),
     etiq_sup:stop_sim(SimPid),
     {noreply, State#{result := Result, waiters := [], sim_pid := undefined}}.
+
+-spec assert_ms_state(term()) -> eccsim_ms_handler:ms_state().
+assert_ms_state(State) when is_record(State, ms_state) ->
+    State.
 
 -spec handle_info(term(), state()) -> {noreply, state()}.
 handle_info(Info, State) ->

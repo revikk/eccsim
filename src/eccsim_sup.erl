@@ -14,7 +14,7 @@
 start_link() ->
     supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
--spec start_sim(eccsim_sim:args()) -> {ok, pid()}.
+-spec start_sim(eccsim_sim:args()) -> supervisor:startchild_ret().
 start_sim(Args) ->
     supervisor:start_child(?SERVER, [Args]).
 
