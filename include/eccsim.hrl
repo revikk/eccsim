@@ -28,7 +28,8 @@
 -record(ms_snapshot, {
     time       :: float(),
     queue_lens :: #{atom() => non_neg_integer()},
-    in_service :: #{atom() => non_neg_integer()}
+    in_service :: #{atom() => non_neg_integer()},
+    arrivals   :: #{atom() => non_neg_integer()}
 }).
 
 -record(ms_config, {
@@ -49,6 +50,7 @@
     last_event_time :: float(),
     queue_areas     :: #{atom() => float()},
     system_area     :: float(),
+    arrival_counts  :: #{atom() => non_neg_integer()},
     interval        :: number() | undefined,
     next_snapshot   :: number() | undefined,
     snapshots       :: [#ms_snapshot{}]

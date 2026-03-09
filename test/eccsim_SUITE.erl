@@ -8,7 +8,6 @@
 -define(SEED, {1, 2, 3}).
 -define(MAX_TIME, 100_000).
 -define(INTERVAL, 1000).
--define(REL_TOL, 0.10).
 
 %%% CT Callbacks
 %%% ============
@@ -28,6 +27,7 @@ groups() ->
             test_ma_independent_accounts,
             test_ma_shared_agents,
             test_ma_csv,
+            test_ma_csv_arrivals_invariant,
             test_ma_no_interval,
             test_ma_no_output_dir
         ]},
@@ -152,6 +152,41 @@ test_ma_csv(CtConfig) ->
     ?assertMatch(<<"time,account,call_type,", _/binary>>, Header),
     ?assertEqual(nomatch, binary:match(Header, <<"agent_utilization">>)),
     ?assert(length(DataLines) > 0).
+
+test_ma_csv_arrivals_invariant(CtConfig) ->
+    %% Verify arrivals >= completions + queue_length + in_service for every CSV row.
+    %% Also verify arrivals is monotonically non-decreasing per account+call_type.
+    Config = ma_config(CtConfig),
+    {ok, _} = eccsim:run(Config),
+    OutputDir = maps:get(output_dir, Config),
+    CsvPath = filename:join(OutputDir, "eccsim_metrics.csv"),
+    {ok, Bin} = file:read_file(CsvPath),
+    Lines = binary:split(Bin, <<"\n">>, [global, trim_all]),
+    [_Header | DataLines] = Lines,
+    PrevArrivals = #{},
+    lists:foldl(fun(Line, PrevAcc) ->
+        [TimeB, AcctB, TypeB, ArrB, CompB, _WaitB, _SvcB, QLenB, InSvcB] =
+            binary:split(Line, <<",">>, [global]),
+        Arr = binary_to_integer(ArrB),
+        Comp = binary_to_integer(CompB),
+        QLen = binary_to_integer(QLenB),
+        InSvc = binary_to_integer(InSvcB),
+        %% arrivals >= completions + queue_length + in_service
+        ?assert(Arr >= Comp + QLen + InSvc,
+                lists:flatten(io_lib:format("invariant failed at ~s,~s,~s: "
+                    "arrivals=~B < comp=~B + ql=~B + is=~B",
+                    [TimeB, AcctB, TypeB, Arr, Comp, QLen, InSvc]))),
+        %% arrivals monotonically non-decreasing per account+call_type
+        Key = {AcctB, TypeB},
+        case maps:find(Key, PrevAcc) of
+            {ok, PrevArr} ->
+                ?assert(Arr >= PrevArr,
+                        lists:flatten(io_lib:format("arrivals decreased at ~s,~s,~s: "
+                            "~B < ~B", [TimeB, AcctB, TypeB, Arr, PrevArr])));
+            error -> ok
+        end,
+        PrevAcc#{Key => Arr}
+    end, PrevArrivals, DataLines).
 
 test_ma_no_interval(CtConfig) ->
     %% run/1 without interval key must not crash and returns empty time-series

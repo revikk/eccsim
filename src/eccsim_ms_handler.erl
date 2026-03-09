@@ -38,11 +38,12 @@ handle_event(#event{type = ms_service_end, data = Data}, Clock, State) ->
     {[sim_event()], ms_state()}.
 handle_arrival(CallType, Clock, State0) ->
     State1 = update_areas(Clock, State0),
+    ArrCounts = maps:update_with(CallType, fun(V) -> V + 1 end, State1#ms_state.arrival_counts),
     Config = State1#ms_state.config,
     TypeCfg = maps:get(CallType, Config#ms_config.call_types),
     {InterArrival, Rand1} = exponential(TypeCfg#call_type_config.lambda, State1#ms_state.rand_state),
     NextArrival = #event{time = Clock + InterArrival, type = ms_call_arrival, data = CallType},
-    State2 = State1#ms_state{rand_state = Rand1},
+    State2 = State1#ms_state{arrival_counts = ArrCounts, rand_state = Rand1},
     Router = Config#ms_config.router,
     case eccsim_router:find_agent(Router, CallType, State2#ms_state.idle_agents) of
         {ok, Agent} ->
@@ -158,7 +159,8 @@ maybe_snapshot(Clock, #ms_state{next_snapshot = Next, interval = Interval} = Sta
     Snap = #ms_snapshot{
         time = Next,
         queue_lens = State#ms_state.queue_lens,
-        in_service = InService
+        in_service = InService,
+        arrivals = State#ms_state.arrival_counts
     },
     State1 = State#ms_state{
         snapshots = [Snap | State#ms_state.snapshots],

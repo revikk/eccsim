@@ -269,6 +269,7 @@ init_ms_state(Config, Seed, Interval) ->
         idle_agents = Config#ms_config.agents,
         busy_agents = #{},
         completed = [],
+        arrival_counts = maps:from_keys(TypeNames, 0),
         rand_state = rand:seed_s(exsss, Seed),
         last_event_time = 0.0,
         queue_areas = QueueAreas,
