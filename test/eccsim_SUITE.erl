@@ -165,8 +165,8 @@ test_ma_csv_arrivals_invariant(CtConfig) ->
     [_Header | DataLines] = Lines,
     PrevArrivals = #{},
     lists:foldl(fun(Line, PrevAcc) ->
-        [TimeB, AcctB, TypeB, ArrB, CompB, _WaitB, _SvcB, QLenB, InSvcB] =
-            binary:split(Line, <<",">>, [global]),
+        [TimeB, AcctB, TypeB, ArrB, CompB, _WaitB, _SvcB, QLenB, InSvcB,
+         _ExclB, _SharedB] = binary:split(Line, <<",">>, [global]),
         Arr = binary_to_integer(ArrB),
         Comp = binary_to_integer(CompB),
         QLen = binary_to_integer(QLenB),

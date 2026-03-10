@@ -61,6 +61,7 @@ simulation and return per-account and aggregate performance metrics.".
 
 -spec run(config()) -> run_result().
 run(#{accounts := Accounts, routing := Routing, max_time := MaxTime} = Config) ->
+    StartTime = os:system_time(second),
     BaseSeed = maps:get(seed, Config, default_seed()),
     Interval = maps:get(interval, Config, undefined),
     OutputDir = maps:get(output_dir, Config, undefined),
@@ -70,7 +71,7 @@ run(#{accounts := Accounts, routing := Routing, max_time := MaxTime} = Config) -
     FinalStates = run_sims_parallel(Sims),
     stop_sims(Sims),
     {PerAccount, AccountTS} = build_account_results(AccountIds, FinalStates, Interval),
-    maybe_write_csv(AccountTS, OutputDir),
+    maybe_write_csv(AccountTS, OutputDir, StartTime),
     Aggregate = build_aggregate(PerAccount, MaxTime, Accounts),
     {ok, #{per_account => PerAccount, aggregate => Aggregate}}.
 
@@ -169,9 +170,10 @@ build_account_results(AccountIds, FinalStates, Interval) ->
 build_account_ts(_State, undefined) ->
     [];
 build_account_ts(State, Interval) ->
-    #ms_state{snapshots = Snaps, completed = Completed} = State,
-    TypeNames = maps:keys(State#ms_state.config#ms_config.call_types),
-    eccsim_ms_metrics:build(lists:reverse(Snaps), Completed, Interval, TypeNames).
+    #ms_state{snapshots = Snaps, completed = Completed, config = Config} = State,
+    TypeNames = maps:keys(Config#ms_config.call_types),
+    AgentCounts = eccsim_ms_metrics:agent_counts(Config#ms_config.agents, TypeNames),
+    eccsim_ms_metrics:build(lists:reverse(Snaps), Completed, Interval, TypeNames, AgentCounts).
 
 -spec build_aggregate(#{term() => account_results()}, number(), map()) -> results().
 build_aggregate(PerAccount, MaxTime, Accounts) ->
@@ -210,13 +212,13 @@ weighted_sum(Items, Key) ->
 %%% CSV output
 %%% ==========
 
--spec maybe_write_csv([{term(), [eccsim_ms_metrics:ms_metric_point()]}], string() | undefined) -> ok.
-maybe_write_csv(_AccountTS, undefined) ->
+-spec maybe_write_csv([{term(), [eccsim_ms_metrics:ms_metric_point()]}], string() | undefined, integer()) -> ok.
+maybe_write_csv(_AccountTS, undefined, _StartTime) ->
     ok;
-maybe_write_csv(AccountTS, OutputDir) ->
+maybe_write_csv(AccountTS, OutputDir, StartTime) ->
     ok = filelib:ensure_dir(filename:join(OutputDir, "x")),
     Path = filename:join(OutputDir, "eccsim_metrics.csv"),
-    CsvData = eccsim_ms_metrics:ma_to_csv(AccountTS),
+    CsvData = eccsim_ms_metrics:ma_to_csv(AccountTS, StartTime),
     ok = file:write_file(Path, CsvData).
 
 %%% Multi-skill config parsing
