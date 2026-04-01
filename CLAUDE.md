@@ -43,6 +43,11 @@ Simulation processes are started dynamically via `etiq_sup`.
 
 Returns `{ok, #{per_account := ..., aggregate := ...}}`.
 
+`eccsim:aggregate/1` extracts the aggregate `results()` from a `run_result()`. Use this instead of pattern-matching the opaque type directly:
+```erlang
+-spec aggregate(run_result()) -> results().
+```
+
 ### Simulation Mode
 
 **Multi-skill multi-account**: each account runs an independent simulation with typed calls, skilled agents, and pluggable routing via `eccsim_router`. Accounts run in parallel (one process per account). Each account gets a deterministic seed derived from the base seed.
@@ -74,6 +79,7 @@ Events are stored in a priority queue (`gb_trees`) keyed by `{Time, Ref}`. The s
 | `eccsim_router` | Behaviour definition + dispatcher for pluggable routing strategies |
 | `eccsim_router_longest_idle` | Longest-idle-agent routing: selects idle agent with matching skill, picks next call by agent priority |
 | `eccsim_ms_metrics` | Time-series metrics builder and CSV export |
+| `eccsim_cli` | Escript CLI entry point — parses args, calls `run/1`, prints results; `do_run/1` and `print_results/1` exported for testability |
 
 ### Key Records (`include/eccsim.hrl`)
 
