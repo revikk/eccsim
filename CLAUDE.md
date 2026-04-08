@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 rebar3 compile                                          # Build (warnings are errors)
 rebar3 lint                                             # Elvis code style check
+rebar3 dialyzer                                         # Type analysis
 rebar3 ct                                               # Run all Common Test suites
 rebar3 ct --suite=test/eccsim_SUITE                     # Run the test suite
 rebar3 ct --suite=test/eccsim_SUITE --case=test_name    # Run a single test case
